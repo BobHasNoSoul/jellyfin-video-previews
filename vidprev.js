@@ -7,12 +7,12 @@
     // segmentCount: Number of preview segments to show per hover (defaults only; runtime clamps to fit video length)
     // segmentDuration: Length of each preview segment in seconds (also adjusted when the full set would exceed the clip)
     const config = {
-        previewStartTime: 840,
-        playbackSpeed: 1.0,
+        previewStartTime: 30,
+        playbackSpeed: 1.5,
         hoverDelay: 100,
         transcodeWidth: 320,
-        segmentCount: 3,
-        segmentDuration: 5
+        segmentCount: 10,
+        segmentDuration: 2
     };
 
     let currentHoverElement = null;
@@ -385,3 +385,4 @@
     observePageMutations();
     checkPreviewVisibility();
 })();
+
