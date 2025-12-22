@@ -4,17 +4,22 @@
     // playbackSpeed: Playback speed for previews (e.g., 2.0 for 2x speed)
     // hoverDelay: Delay before playing preview in milliseconds
     // transcodeWidth: Width for transcoded video in pixels (default 320)
+    // segmentCount: Number of preview segments to show per hover (defaults only; runtime clamps to fit video length)
+    // segmentDuration: Length of each preview segment in seconds (also adjusted when the full set would exceed the clip)
     const config = {
         previewStartTime: 840,
         playbackSpeed: 1.0,
         hoverDelay: 100,
-        transcodeWidth: 320
+        transcodeWidth: 320,
+        segmentCount: 3,
+        segmentDuration: 5
     };
 
     let currentHoverElement = null;
     let currentVideo = null;
     let token = null;
     let hoverTimeout = null;
+    let segmentTimers = [];
 
     const previewOverlay = document.createElement("div");
     previewOverlay.id = "preview-overlay";
@@ -58,6 +63,10 @@
         if (hoverTimeout) {
             clearTimeout(hoverTimeout);
             hoverTimeout = null;
+        }
+        if (segmentTimers.length) {
+            segmentTimers.forEach(clearTimeout);
+            segmentTimers = [];
         }
         previewVideo.src = "";
         previewVideo.style.display = "none";
@@ -105,6 +114,68 @@
         }
     };
 
+    const getSegmentPlan = (durationSeconds) => {
+        const desiredCount = Math.max(1, Math.floor(config.segmentCount));
+        const desiredDuration = Math.max(0.1, config.segmentDuration);
+
+        if (!durationSeconds || durationSeconds <= 0) {
+            return { count: desiredCount, duration: desiredDuration };
+        }
+
+        const maxSegmentsFromDuration = Math.max(1, Math.floor(durationSeconds / desiredDuration));
+        const count = Math.min(desiredCount, maxSegmentsFromDuration);
+        const duration = Math.min(desiredDuration, durationSeconds / count);
+        return { count, duration };
+    };
+
+    const getSegmentStartTimes = (durationSeconds, count, segmentDuration) => {
+        const { previewStartTime } = config;
+        if (!durationSeconds || durationSeconds <= 0) {
+            return Array.from({ length: count }, (_, i) => previewStartTime + i * segmentDuration);
+        }
+
+        const maxStart = Math.max(durationSeconds - segmentDuration, 0);
+        const firstStart = Math.min(previewStartTime, maxStart);
+        if (count === 1) {
+            return [firstStart];
+        }
+
+        const spacing = (maxStart - firstStart) / (count - 1);
+        return Array.from({ length: count }, (_, i) => Math.min(firstStart + spacing * i, maxStart));
+    };
+
+    const scheduleSegmentPlayback = (startTimes, durationSeconds, segmentDuration) => {
+        const wait = (ms) => new Promise(resolve => {
+            const timer = setTimeout(resolve, ms);
+            segmentTimers.push(timer);
+        });
+
+        const playSequence = async () => {
+            for (const startTime of startTimes) {
+                if (currentVideo !== previewVideo || previewOverlay.style.display === "none") {
+                    return;
+                }
+
+                const boundedStart = Math.max(0, Math.min(startTime, Math.max(durationSeconds - segmentDuration, 0)));
+                previewVideo.currentTime = boundedStart;
+                await previewVideo.play();
+
+                const remainingSeconds = durationSeconds ? Math.max(durationSeconds - boundedStart, 0) : segmentDuration;
+                const segmentDurationMs = Math.min(segmentDuration, remainingSeconds) * 1000;
+                if (segmentDurationMs <= 0) {
+                    break;
+                }
+                await wait(segmentDurationMs);
+            }
+
+            if (currentVideo === previewVideo && previewOverlay.style.display !== "none") {
+                clearPreview();
+            }
+        };
+
+        playSequence();
+    };
+
     const playPreview = async (itemId, container) => {
         clearPreview();
         try {
@@ -128,6 +199,9 @@
                     return;
                 }
             }
+            const durationSeconds = item.RunTimeTicks ? item.RunTimeTicks / 10000000 : null;
+            const segmentPlan = getSegmentPlan(durationSeconds);
+            const segmentStartTimes = getSegmentStartTimes(durationSeconds, segmentPlan.count, segmentPlan.duration);
             const startTimeTicks = config.previewStartTime * 10000000;
             let videoUrl = `${domain}/Videos/${videoId}/stream?static=true&api_key=${token}&StartTimeTicks=${startTimeTicks}`;
             console.debug(`Attempting direct playback for item ${videoId}: ${videoUrl}`);
@@ -138,9 +212,7 @@
             currentVideo = previewVideo;
             try {
                 await previewVideo.play();
-                if (config.previewStartTime > 0) {
-                    previewVideo.currentTime = config.previewStartTime;
-                }
+                scheduleSegmentPlayback(segmentStartTimes, durationSeconds, segmentPlan.duration);
                 return;
             } catch (e) {
                 console.warn(`Direct playback failed for item ${videoId}:`, e);
@@ -154,9 +226,7 @@
             previewOverlay.style.display = "block";
             currentVideo = previewVideo;
             await previewVideo.play();
-            if (config.previewStartTime > 0) {
-                previewVideo.currentTime = config.previewStartTime;
-            }
+            scheduleSegmentPlayback(segmentStartTimes, durationSeconds, segmentPlan.duration);
         } catch (e) {
             console.error(`Error playing preview for item ${itemId}:`, e);
             clearPreview();
